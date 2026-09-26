@@ -88,7 +88,10 @@ jobs:
                 console.log(v.pop());
               ")
           echo "Latest opencode v1: $LATEST_V1"
-          npm install -g "opencode-ai@$LATEST_V1"
+          # --ignore-scripts skips the postinstall.mjs which fails in minimal
+          # environments (e.g. Ubuntu 20.04 container). The CLI binary is
+          # installed by the package's main install and works without it.
+          npm install -g --ignore-scripts "opencode-ai@$LATEST_V1"
           # Ensure npm global bin is on PATH
           echo "$(npm root -g)/.bin" >> $GITHUB_PATH
         shell: bash
@@ -185,16 +188,21 @@ jobs:
         shell: bash
         run: curl -fsSL https://opencode.ai/v2/install | bash
 
+      # On Windows, the install script adds a Unix-style path (/c/Users/...) to
+      # $GITHUB_PATH. Bash understands this but Go's os/exec on Windows reads
+      # %PATH% and expects Windows-style paths (C:\Users\...). Adding the
+      # Windows-style path in a separate step lets $GITHUB_PATH take effect
+      # before the verify step, so the Go test helper can find opencode.exe.
+      - name: Fix opencode PATH for Windows (Go compat)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $winpath = Join-Path $HOME ".opencode\bin"
+          Add-Content -Path $env:GITHUB_PATH -Value $winpath
+
       - name: Verify v2 install and test detection
         shell: bash
         run: |
-          # On Windows, the install script adds a Unix-style path (/c/Users/...) to
-          # $GITHUB_PATH which bash understands but Go's os/exec on Windows does not.
-          # Ensure the Windows-style path is also on PATH for the Go test helper.
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            winpath=$(pwsh -NoProfile -Command "\$home\\.opencode\\bin" 2>/dev/null || echo "$HOME/.opencode/bin")
-            echo "$winpath" >> $GITHUB_PATH
-          fi
           version=$(opencode --version)
           echo "v2 binary reports: $version"
           echo "$version" | grep -E "^opencode v2\." || {
@@ -231,7 +239,10 @@ jobs:
                 console.log(v.pop());
               ")
           echo "Latest opencode v1: $LATEST_V1"
-          npm install -g "opencode-ai@$LATEST_V1"
+          # --ignore-scripts skips the postinstall.mjs which can fail in
+          # constrained environments. The CLI binary is installed by the
+          # package's main install and works without it.
+          npm install -g --ignore-scripts "opencode-ai@$LATEST_V1"
           # Ensure npm global bin is on PATH
           echo "$(npm root -g)/.bin" >> $GITHUB_PATH
 
