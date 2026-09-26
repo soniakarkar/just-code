@@ -30,7 +30,7 @@ jobs:
       - name: Install build tools
         # nodejs is needed for npm (opencode v1 installation). The version in
         # Ubuntu 20.04 is old but sufficient for `npm view` and `npm install`.
-        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates gcc git nodejs npm
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gcc git nodejs npm
       - uses: actions/checkout@v7
       - name: Trust the mounted workspace
         run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
@@ -174,14 +174,7 @@ jobs:
       # ---- Test with opencode v2 ----
       - name: Install opencode v2
         shell: bash
-        run: |
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            curl -fsSLo opencode-v2.exe "https://opencode.ai/v2/download/windows-${{ matrix.arch }}"
-            mkdir -p ~/.opencode/bin
-            mv opencode-v2.exe ~/.opencode/bin/opencode.exe
-          else
-            curl -fsSL https://opencode.ai/v2/install | bash
-          fi
+        run: curl -fsSL https://opencode.ai/v2/install | bash
 
       - name: Verify v2 install and test detection
         shell: bash
