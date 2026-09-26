@@ -5,6 +5,8 @@ workspace/
 # Go build artifacts
 /just-code
 /just-code-*
+/test-version
+/test-version-detect
 
 # Python
 __pycache__/
