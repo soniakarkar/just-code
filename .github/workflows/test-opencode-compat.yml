@@ -75,8 +75,17 @@ jobs:
           # Dynamically resolve latest v1.x from npm registry
           LATEST_V1=$(npm view opencode-ai versions --json \
             | node -e "
-                const v = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-                console.log(v.filter(x => /^1\\.\\d+\\.\\d+$/.test(x)).sort().pop());
+                const v = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'))
+                  .filter(x => /^1\\.\\d+\\.\\d+$/.test(x));
+                v.sort((a, b) => {
+                  const pa = a.split('.').map(Number);
+                  const pb = b.split('.').map(Number);
+                  for (let i = 0; i < 3; i++) {
+                    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+                  }
+                  return 0;
+                });
+                console.log(v.pop());
               ")
           echo "Latest opencode v1: $LATEST_V1"
           npm install -g "opencode-ai@$LATEST_V1"
@@ -179,6 +188,13 @@ jobs:
       - name: Verify v2 install and test detection
         shell: bash
         run: |
+          # On Windows, the install script adds a Unix-style path (/c/Users/...) to
+          # $GITHUB_PATH which bash understands but Go's os/exec on Windows does not.
+          # Ensure the Windows-style path is also on PATH for the Go test helper.
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            winpath=$(pwsh -NoProfile -Command "\$home\\.opencode\\bin" 2>/dev/null || echo "$HOME/.opencode/bin")
+            echo "$winpath" >> $GITHUB_PATH
+          fi
           version=$(opencode --version)
           echo "v2 binary reports: $version"
           echo "$version" | grep -E "^opencode v2\." || {
@@ -202,8 +218,17 @@ jobs:
           # Dynamically resolve latest v1.x from npm registry
           LATEST_V1=$(npm view opencode-ai versions --json \
             | node -e "
-                const v = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-                console.log(v.filter(x => /^1\\.\\d+\\.\\d+$/.test(x)).sort().pop());
+                const v = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'))
+                  .filter(x => /^1\\.\\d+\\.\\d+$/.test(x));
+                v.sort((a, b) => {
+                  const pa = a.split('.').map(Number);
+                  const pb = b.split('.').map(Number);
+                  for (let i = 0; i < 3; i++) {
+                    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+                  }
+                  return 0;
+                });
+                console.log(v.pop());
               ")
           echo "Latest opencode v1: $LATEST_V1"
           npm install -g "opencode-ai@$LATEST_V1"
