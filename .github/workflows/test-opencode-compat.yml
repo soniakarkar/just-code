@@ -76,9 +76,12 @@ jobs:
           if [ -f ~/.opencode/bin/opencode ]; then
             mv ~/.opencode/bin/opencode ~/.opencode/bin/opencode.v2
           fi
-          # Dynamically resolve latest v1.x from npm registry
+          # Dynamically resolve latest v1.x from npm registry.
+          # Use a temp file to avoid platform issues: /dev/stdin doesn't
+          # exist on Windows, and the JSON is too large for process.argv.
+          npm view opencode-ai versions --json 2>/dev/null > /tmp/oc-versions.json
           LATEST_V1=$(node -e "
-            const versions = JSON.parse(process.argv[1]);
+            const versions = JSON.parse(require('fs').readFileSync('/tmp/oc-versions.json','utf8'));
             const v = versions.filter(x => /^1\\.\\d+\\.\\d+$/.test(x));
             v.sort((a, b) => {
               const pa = a.split('.').map(Number);
@@ -89,7 +92,8 @@ jobs:
               return 0;
             });
             console.log(v.pop());
-          " "$(npm view opencode-ai versions --json 2>/dev/null)")
+          ")
+          rm -f /tmp/oc-versions.json
           echo "Latest opencode v1: $LATEST_V1"
           # The postinstall.mjs creates the CLI symlink and needs a modern
           # Node.js (container uses Node.js 20.x installed from NodeSource).
@@ -225,9 +229,12 @@ jobs:
           if [ -f ~/.opencode/bin/opencode.exe ]; then
             mv ~/.opencode/bin/opencode.exe ~/.opencode/bin/opencode.v2.exe
           fi
-          # Dynamically resolve latest v1.x from npm registry
+          # Dynamically resolve latest v1.x from npm registry.
+          # Use a temp file to avoid platform issues: /dev/stdin doesn't
+          # exist on Windows, and the JSON is too large for process.argv.
+          npm view opencode-ai versions --json 2>/dev/null > /tmp/oc-versions.json
           LATEST_V1=$(node -e "
-            const versions = JSON.parse(process.argv[1]);
+            const versions = JSON.parse(require('fs').readFileSync('/tmp/oc-versions.json','utf8'));
             const v = versions.filter(x => /^1\\.\\d+\\.\\d+$/.test(x));
             v.sort((a, b) => {
               const pa = a.split('.').map(Number);
@@ -238,7 +245,8 @@ jobs:
               return 0;
             });
             console.log(v.pop());
-          " "$(npm view opencode-ai versions --json 2>/dev/null)")
+          ")
+          rm -f /tmp/oc-versions.json
           echo "Latest opencode v1: $LATEST_V1"
           # The postinstall.mjs creates the CLI symlink.
           npm install -g "opencode-ai@$LATEST_V1"
