@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"net/url"
 	"os/exec"
 	"strings"
 
@@ -699,6 +700,22 @@ func configImportEnvCmd(path string) (int, error) {
 	return 0, nil
 }
 
+// detectOpencodeVersion returns 1 or 2 based on `opencode --version`.
+// v2+ prints "opencode v2.x.y" (or "opencode v3.x.y" in future).
+// v1 prints a plain semver like "1.18.32".
+func detectOpencodeVersion() (int, error) {
+	cmd := exec.Command("opencode", "--version")
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("cannot run 'opencode --version': %w", err)
+	}
+	v := strings.TrimSpace(string(out))
+	if strings.HasPrefix(v, "opencode v2.") || strings.HasPrefix(v, "opencode v3.") {
+		return 2, nil
+	}
+	return 1, nil
+}
+
 func attachCmd(d *justcode.Dispatcher, cfg justcode.Config, rt justcode.Runtime) (int, error) {
 	b, err := d.Backend(rt)
 	if err != nil {
@@ -743,7 +760,24 @@ func attachCmd(d *justcode.Dispatcher, cfg justcode.Config, rt justcode.Runtime)
 		return 0, fmt.Errorf("%w\n  Run 'just-code logs --%s' to see why, or 'just-code restart --%s' to recreate it.", err, rt, rt)
 	}
 
-	attachErr := justcode.RunInteractive("opencode", "attach", endpoint, "--username", cfg.Username, "--password", cfg.Password)
+	ocVersion, err := detectOpencodeVersion()
+	if err != nil {
+		return 0, err
+	}
+
+	var attachErr error
+	if ocVersion >= 2 {
+		// v2+: use --server with credentials embedded in the URL
+		u, parseErr := url.Parse(endpoint)
+		if parseErr != nil {
+			return 0, fmt.Errorf("invalid backend URL %q: %w", endpoint, parseErr)
+		}
+		u.User = url.UserPassword(cfg.Username, cfg.Password)
+		attachErr = justcode.RunInteractive("opencode", "--server", u.String())
+	} else {
+		// v1: use attach subcommand with --username/--password flags
+		attachErr = justcode.RunInteractive("opencode", "attach", endpoint, "--username", cfg.Username, "--password", cfg.Password)
+	}
 	code := exitCodeOf(attachErr)
 	askToStop(ctx, d, rt)
 	return code, attachErr

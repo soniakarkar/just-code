@@ -1,0 +1,244 @@
+# Tests that the opencode version-detection logic works correctly with both
+# opencode v1 (npm package) and opencode v2+ (standalone binary) on every
+# supported platform. It does not boot a microVM: hosted runners lack nested
+# virtualization.
+name: test-opencode-compat
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux builds inside Ubuntu 20.04 so the binary remains compatible with the
+  # SDK's glibc baseline instead of inheriting the runner host's newer glibc.
+  compat-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:20.04
+    steps:
+      - name: Install build tools
+        # nodejs is needed for npm (opencode v1 installation). The version in
+        # Ubuntu 20.04 is old but sufficient for `npm view` and `npm install`.
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates gcc git nodejs npm
+      - uses: actions/checkout@v4
+      - name: Trust the mounted workspace
+        run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: Verify native target
+        run: |
+          test "$(go env GOOS)" = "linux"
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+
+      - name: Build just-code
+        run: go build -o just-code ./cmd/just-code
+
+      - name: Build version detection test helper
+        run: go build -o test-version ./cmd/test-version-detect
+
+      # ---- Test with opencode v2 ----
+      - name: Install opencode v2
+        run: curl -fsSL https://opencode.ai/v2/install | bash
+        shell: bash
+
+      - name: Verify v2 install and test detection
+        run: |
+          version=$(opencode --version)
+          echo "v2 binary reports: $version"
+          echo "$version" | grep -E "^opencode v2\." || {
+            echo "FAIL: expected v2, got '$version'"
+            exit 1
+          }
+          ./test-version
+
+      # ---- Swap to opencode v1 ----
+      - name: Install opencode v1 (latest v1.x from npm)
+        run: |
+          # Move v2 binary out of the way
+          mkdir -p ~/.opencode/bin
+          if [ -f ~/.opencode/bin/opencode ]; then
+            mv ~/.opencode/bin/opencode ~/.opencode/bin/opencode.v2
+          fi
+          # Dynamically resolve latest v1.x from npm registry
+          LATEST_V1=$(npm view opencode-ai versions --json \
+            | node -e "
+                const v = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                console.log(v.filter(x => /^1\\.\\d+\\.\\d+$/.test(x)).sort().pop());
+              ")
+          echo "Latest opencode v1: $LATEST_V1"
+          npm install -g "opencode-ai@$LATEST_V1"
+          # Ensure npm global bin is on PATH
+          echo "$(npm root -g)/.bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Verify v1 install and test detection
+        run: |
+          version=$(opencode --version)
+          echo "v1 binary reports: $version"
+          # Assert it's NOT v2+
+          echo "$version" | grep -v -E "^opencode v[2-9]\." || {
+            echo "FAIL: expected v1, got '$version'"
+            exit 1
+          }
+          ./test-version
+
+      # ---- Restore v2 and run full unit tests ----
+      - name: Restore v2 and run unit tests
+        run: |
+          if [ -f ~/.opencode/bin/opencode.v2 ]; then
+            mv ~/.opencode/bin/opencode.v2 ~/.opencode/bin/opencode
+          fi
+          # Remove npm's v1 if it shadows the restored v2
+          rm -f "$(npm root -g)/.bin/opencode" 2>/dev/null || true
+          go test ./...
+
+  # macOS and Windows runners have Node.js pre-installed and do not use a
+  # container, so the setup is closer to the platform-desktop job in ci.yml.
+  compat-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            os: darwin
+            arch: arm64
+          - runner: windows-2025
+            os: windows
+            arch: amd64
+          - runner: windows-11-arm
+            os: windows
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows' && 'pwsh' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v4
+      # The runner's gcc is an x86_64 MinGW cross compiler, which cannot
+      # assemble arm64. CGO needs a GNU-ABI aarch64 compiler, so the pinned
+      # LLVM-MinGW toolchain is installed for the Windows arm64 leg.
+      - name: Install the Windows arm64 C toolchain
+        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+        shell: pwsh
+        env:
+          LLVM_MINGW_VERSION: "20260616"
+          LLVM_MINGW_SHA256: "312593669435bd0bfc1a43ac3fba23c8b27e0610bade88b2738e5a01702a99ba"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $version = $env:LLVM_MINGW_VERSION
+          $zip = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          $dest = Join-Path $env:RUNNER_TEMP 'llvm-mingw'
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-aarch64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+          if ($actual -ne $env:LLVM_MINGW_SHA256) {
+            throw "LLVM-MinGW checksum mismatch: got $actual"
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dest -Force
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $dest "llvm-mingw-$version-ucrt-aarch64\bin")
+          Add-Content -Path $env:GITHUB_ENV -Value 'CC=aarch64-w64-mingw32-clang'
+          Add-Content -Path $env:GITHUB_ENV -Value 'CXX=aarch64-w64-mingw32-clang++'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: Verify native target
+        shell: bash
+        run: |
+          test "$(go env GOOS)" = "${{ matrix.os }}"
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "windows" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            go env CC | grep -q aarch64-w64-mingw32-clang
+          fi
+
+      - name: Build just-code
+        run: go build -o just-code ./cmd/just-code
+
+      - name: Build version detection test helper
+        run: go build -o test-version ./cmd/test-version-detect
+
+      # ---- Test with opencode v2 ----
+      - name: Install opencode v2
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            curl -fsSLo opencode-v2.exe "https://opencode.ai/v2/download/windows-${{ matrix.arch }}"
+            mkdir -p ~/.opencode/bin
+            mv opencode-v2.exe ~/.opencode/bin/opencode.exe
+          else
+            curl -fsSL https://opencode.ai/v2/install | bash
+          fi
+
+      - name: Verify v2 install and test detection
+        shell: bash
+        run: |
+          version=$(opencode --version)
+          echo "v2 binary reports: $version"
+          echo "$version" | grep -E "^opencode v2\." || {
+            echo "FAIL: expected v2, got '$version'"
+            exit 1
+          }
+          ./test-version
+
+      # ---- Swap to opencode v1 ----
+      - name: Install opencode v1 (latest v1.x from npm)
+        shell: bash
+        run: |
+          # Move v2 binary out of the way
+          mkdir -p ~/.opencode/bin
+          if [ -f ~/.opencode/bin/opencode ]; then
+            mv ~/.opencode/bin/opencode ~/.opencode/bin/opencode.v2
+          fi
+          if [ -f ~/.opencode/bin/opencode.exe ]; then
+            mv ~/.opencode/bin/opencode.exe ~/.opencode/bin/opencode.v2.exe
+          fi
+          # Dynamically resolve latest v1.x from npm registry
+          LATEST_V1=$(npm view opencode-ai versions --json \
+            | node -e "
+                const v = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                console.log(v.filter(x => /^1\\.\\d+\\.\\d+$/.test(x)).sort().pop());
+              ")
+          echo "Latest opencode v1: $LATEST_V1"
+          npm install -g "opencode-ai@$LATEST_V1"
+          # Ensure npm global bin is on PATH
+          echo "$(npm root -g)/.bin" >> $GITHUB_PATH
+
+      - name: Verify v1 install and test detection
+        shell: bash
+        run: |
+          version=$(opencode --version)
+          echo "v1 binary reports: $version"
+          # Assert it's NOT v2+
+          echo "$version" | grep -v -E "^opencode v[2-9]\." || {
+            echo "FAIL: expected v1, got '$version'"
+            exit 1
+          }
+          ./test-version
+
+      # ---- Restore v2 and run full unit tests ----
+      - name: Restore v2 and run unit tests
+        shell: bash
+        run: |
+          if [ -f ~/.opencode/bin/opencode.v2 ]; then
+            mv ~/.opencode/bin/opencode.v2 ~/.opencode/bin/opencode
+          fi
+          if [ -f ~/.opencode/bin/opencode.v2.exe ]; then
+            mv ~/.opencode/bin/opencode.v2.exe ~/.opencode/bin/opencode.exe
+          fi
+          # Remove npm's v1 if it shadows the restored v2
+          rm -f "$(npm root -g)/.bin/opencode" "$(npm root -g)/.bin/opencode.exe" 2>/dev/null || true
+          go test ./...
