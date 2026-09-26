@@ -1,7 +1,7 @@
-# Tests that the opencode version-detection logic works correctly with both
-# opencode v1 (npm package) and opencode v2+ (standalone binary) on every
-# supported platform. It does not boot a microVM: hosted runners lack nested
-# virtualization.
+# Tests that just-code correctly detects opencode v1 (npm package) and
+# opencode v2+ (standalone binary) on every supported platform. Each job
+# installs only one version — no PATH conflicts, no dual-install hacks.
+# It does not boot a microVM: hosted runners lack nested virtualization.
 name: test-opencode-compat
 
 on:
@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  compat:
+  compat-v2:
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +39,6 @@ jobs:
     container: ${{ matrix.container || null }}
     defaults:
       run:
-        # bash is available on all runners (Git Bash on Windows).
         shell: bash
 
     steps:
@@ -47,10 +46,6 @@ jobs:
 
       # ---- Platform-specific setup ----
 
-      # Linux builds inside Ubuntu 20.04 so the binary remains compatible with
-      # the SDK's glibc baseline. Ubuntu 20.04's apt nodejs (v10) is too old
-      # for opencode-ai's postinstall.mjs which uses modern JS syntax, so
-      # install Node.js 20.x from NodeSource instead.
       - name: Install Node.js 20.x (Linux container)
         if: matrix.container != null
         run: |
@@ -58,9 +53,6 @@ jobs:
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
           DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
 
-      # The windows-11-arm runner's gcc is an x86_64 MinGW cross compiler,
-      # which cannot assemble arm64. CGO needs a GNU-ABI aarch64 compiler, so
-      # the pinned LLVM-MinGW toolchain is installed for the Windows arm64 leg.
       - name: Install Windows arm64 C toolchain
         if: matrix.runner == 'windows-11-arm'
         shell: pwsh
@@ -97,12 +89,10 @@ jobs:
             go env CC | grep -q aarch64-w64-mingw32-clang
           fi
 
-      - name: Build just-code and test helper
-        run: |
-          go build -o just-code ./cmd/just-code
-          go build -o test-version ./cmd/test-version-detect
+      - name: Build just-code
+        run: go build -o just-code ./cmd/just-code
 
-      # ---- Test with opencode v2 ----
+      # ---- Test with opencode v2 only ----
 
       - name: Install opencode v2
         run: curl -fsSL https://opencode.ai/v2/install | bash
@@ -110,14 +100,13 @@ jobs:
       # On Windows, the install script adds a Unix-style path (/c/Users/...) to
       # $GITHUB_PATH. Bash understands this but Go's os/exec on Windows reads
       # %PATH% and expects Windows-style paths (C:\Users\...). Adding the
-      # Windows-style path in a separate step lets $GITHUB_PATH take effect
-      # before the verify step, so the Go test helper can find opencode.exe.
+      # Windows-style path in a separate step makes it findable by the Go test.
       - name: Add opencode v2 to Windows PATH
         if: matrix.os == 'windows'
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $HOME ".opencode\bin")
 
-      - name: Verify v2 detection
+      - name: Verify opencode version format
         run: |
           version=$(opencode --version)
           echo "v2: $version"
@@ -125,36 +114,108 @@ jobs:
             echo "FAIL: expected v2, got '$version'"
             exit 1
           }
-          ./test-version
 
-      # ---- Test with opencode v1 (installed to a separate prefix) ----
+      - name: Test detectOpencodeVersion via Go test
+        run: |
+          EXPECTED_OPENCODE_VERSION=2 go test -run TestDetectOpencodeVersion ./cmd/just-code/
+
+      - name: Smoke test just-code binary
+        run: ./just-code --version
+
+  compat-v1:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: amd64
+            container: ubuntu:20.04
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            container: ubuntu:20.04
+          - runner: macos-15
+            os: darwin
+            arch: arm64
+          - runner: windows-2025
+            os: windows
+            arch: amd64
+          - runner: windows-11-arm
+            os: windows
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || null }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # ---- Platform-specific setup ----
+
+      - name: Install Node.js 20.x (Linux container)
+        if: matrix.container != null
+        run: |
+          apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gcc git
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+
+      - name: Install Windows arm64 C toolchain
+        if: matrix.runner == 'windows-11-arm'
+        shell: pwsh
+        env:
+          LLVM_MINGW_VERSION: "20260616"
+          LLVM_MINGW_SHA256: "312593669435bd0bfc1a43ac3fba23c8b27e0610bade88b2738e5a01702a99ba"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $ver = $env:LLVM_MINGW_VERSION
+          $zip = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          $dest = Join-Path $env:RUNNER_TEMP 'llvm-mingw'
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/llvm-mingw-$ver-ucrt-aarch64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+          if ($actual -ne $env:LLVM_MINGW_SHA256) {
+            throw "LLVM-MinGW checksum mismatch: got $actual"
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dest -Force
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $dest "llvm-mingw-$ver-ucrt-aarch64\bin")
+          Add-Content -Path $env:GITHUB_ENV -Value 'CC=aarch64-w64-mingw32-clang'
+          Add-Content -Path $env:GITHUB_ENV -Value 'CXX=aarch64-w64-mingw32-clang++'
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Verify native target
+        run: |
+          test "$(go env GOOS)" = "${{ matrix.os }}"
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "windows" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            go env CC | grep -q aarch64-w64-mingw32-clang
+          fi
+
+      - name: Build just-code
+        run: go build -o just-code ./cmd/just-code
+
+      # ---- Test with opencode v1 only (installed via npm) ----
 
       - name: Install opencode v1
         run: |
-          V1_PREFIX="$HOME/.opencode-v1"
           # Resolve the latest 1.x version from npm. The pipe reads stdin via
           # file descriptor 0, which works on both Unix and Windows (unlike
           # /dev/stdin).
           LATEST_V1=$(npm view opencode-ai versions --json 2>/dev/null | \
             node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).reverse().find(x=>/^1\.\d+\.\d+$/.test(x))")
           echo "Latest v1: $LATEST_V1"
-          # Install to a separate prefix so v2 is undisturbed — no moving
-          # binaries, no restore step needed.
-          npm install -g --prefix "$V1_PREFIX" "opencode-ai@$LATEST_V1"
+          # Install globally (no --prefix). Only v1 exists in this job, so
+          # there is nothing to conflict with and no PATH manipulation needed.
+          npm install -g "opencode-ai@$LATEST_V1"
 
-      # On Unix, echo works fine (no backslashes in paths). On Windows, the
-      # Go test helper reads the native %PATH% and needs Windows-style paths,
-      # so PowerShell is used.
-      - name: Add opencode v1 to PATH (Unix)
-        if: matrix.os != 'windows'
-        run: echo "$HOME/.opencode-v1/bin" >> $GITHUB_PATH
-
-      - name: Add opencode v1 to Windows PATH
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $HOME ".opencode-v1\bin")
-
-      - name: Verify v1 detection
+      - name: Verify opencode version format
         run: |
           version=$(opencode --version)
           echo "v1: $version"
@@ -162,9 +223,10 @@ jobs:
             echo "FAIL: expected v1, got '$version'"
             exit 1
           }
-          ./test-version
 
-      # ---- Clean up v1 prefix (no restore needed: v2 was never moved) ----
+      - name: Test detectOpencodeVersion via Go test
+        run: |
+          EXPECTED_OPENCODE_VERSION=1 go test -run TestDetectOpencodeVersion ./cmd/just-code/
 
-      - name: Remove v1 installation
-        run: rm -rf "$HOME/.opencode-v1"
+      - name: Smoke test just-code binary
+        run: ./just-code --version
