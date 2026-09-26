@@ -12,8 +12,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.22"
           cache: true
@@ -38,13 +38,13 @@ jobs:
     steps:
       - name: Install build tools
         run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates gcc git
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Trust the mounted workspace
         # VCS stamping shells out to git, and the container user does not own the
         # mounted checkout. Writing the exception to the system config makes it
         # visible to every later step regardless of HOME.
         run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.22"
           cache: true
@@ -74,7 +74,7 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The runner's gcc is an x86_64 MinGW cross compiler, which cannot
       # assemble arm64. CGO needs a GNU-ABI aarch64 compiler, so the pinned
       # LLVM-MinGW toolchain is installed for the Windows arm64 leg.
@@ -100,7 +100,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $dest "llvm-mingw-$version-ucrt-aarch64\bin")
           Add-Content -Path $env:GITHUB_ENV -Value 'CC=aarch64-w64-mingw32-clang'
           Add-Content -Path $env:GITHUB_ENV -Value 'CXX=aarch64-w64-mingw32-clang++'
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.22"
           cache: true
