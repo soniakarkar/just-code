@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       release_created: ${{ steps.release.outputs.release_created || steps.dispatch.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name || steps.dispatch.outputs.tag_name }}
@@ -185,7 +185,7 @@ jobs:
   publish:
     needs: [release-please, build-linux, build-desktop]
     if: needs.release-please.outputs.release_created == 'true' && needs.build-linux.result == 'success' && needs.build-desktop.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
