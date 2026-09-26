@@ -13,124 +13,19 @@ permissions:
   contents: read
 
 jobs:
-  # Linux builds inside Ubuntu 20.04 so the binary remains compatible with the
-  # SDK's glibc baseline instead of inheriting the runner host's newer glibc.
-  compat-linux:
+  compat:
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
+            os: linux
             arch: amd64
+            container: ubuntu:20.04
           - runner: ubuntu-24.04-arm
+            os: linux
             arch: arm64
-    runs-on: ${{ matrix.runner }}
-    container: ubuntu:20.04
-    steps:
-      - name: Install build tools
-        # Ubuntu 20.04 apt nodejs (v10) is too old for opencode-ai's
-        # postinstall.mjs which uses modern JS syntax. Install Node.js 20.x
-        # from NodeSource before pulling in npm.
-        run: |
-          apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gcc git
-          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-          DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-      - uses: actions/checkout@v7
-      - name: Trust the mounted workspace
-        run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.22"
-          cache: true
-      - name: Verify native target
-        run: |
-          test "$(go env GOOS)" = "linux"
-          test "$(go env GOARCH)" = "${{ matrix.arch }}"
-
-      - name: Build just-code
-        run: go build -o just-code ./cmd/just-code
-
-      - name: Build version detection test helper
-        run: go build -o test-version ./cmd/test-version-detect
-
-      # ---- Test with opencode v2 ----
-      - name: Install opencode v2
-        run: curl -fsSL https://opencode.ai/v2/install | bash
-        shell: bash
-
-      - name: Verify v2 install and test detection
-        run: |
-          version=$(opencode --version)
-          echo "v2 binary reports: $version"
-          echo "$version" | grep -E "^opencode v2\." || {
-            echo "FAIL: expected v2, got '$version'"
-            exit 1
-          }
-          ./test-version
-
-      # ---- Swap to opencode v1 ----
-      - name: Install opencode v1 (latest v1.x from npm)
-        run: |
-          # Move v2 binary out of the way
-          mkdir -p ~/.opencode/bin
-          if [ -f ~/.opencode/bin/opencode ]; then
-            mv ~/.opencode/bin/opencode ~/.opencode/bin/opencode.v2
-          fi
-          # Dynamically resolve latest v1.x from npm registry.
-          # Use mktemp for a platform-correct temp path (Git Bash on Windows
-          # translates /tmp to a different location than Node.js does).
-          TMPFILE=$(mktemp)
-          npm view opencode-ai versions --json 2>/dev/null > "$TMPFILE"
-          LATEST_V1=$(node -e "
-            const versions = JSON.parse(require('fs').readFileSync('$TMPFILE','utf8'));
-            const v = versions.filter(x => /^1\\.\\d+\\.\\d+$/.test(x));
-            v.sort((a, b) => {
-              const pa = a.split('.').map(Number);
-              const pb = b.split('.').map(Number);
-              for (let i = 0; i < 3; i++) {
-                if (pa[i] !== pb[i]) return pa[i] - pb[i];
-              }
-              return 0;
-            });
-            console.log(v.pop());
-          ")
-          rm -f "$TMPFILE"
-          echo "Latest opencode v1: $LATEST_V1"
-          # The postinstall.mjs creates the CLI symlink and needs a modern
-          # Node.js (container uses Node.js 20.x installed from NodeSource).
-          npm install -g "opencode-ai@$LATEST_V1"
-          # Ensure npm global bin is on PATH
-          echo "$(npm root -g)/.bin" >> $GITHUB_PATH
-        shell: bash
-
-      - name: Verify v1 install and test detection
-        run: |
-          version=$(opencode --version)
-          echo "v1 binary reports: $version"
-          # Assert it's NOT v2+
-          echo "$version" | grep -v -E "^opencode v[2-9]\." || {
-            echo "FAIL: expected v1, got '$version'"
-            exit 1
-          }
-          ./test-version
-
-      # ---- Restore v2 and run full unit tests ----
-      - name: Restore v2 and run unit tests
-        run: |
-          if [ -f ~/.opencode/bin/opencode.v2 ]; then
-            mv ~/.opencode/bin/opencode.v2 ~/.opencode/bin/opencode
-          fi
-          # Remove npm's v1 if it shadows the restored v2
-          rm -f "$(npm root -g)/.bin/opencode" 2>/dev/null || true
-          go test ./...
-
-  # macOS and Windows runners have Node.js pre-installed and do not use a
-  # container, so the setup is closer to the platform-desktop job in ci.yml.
-  compat-desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
+            container: ubuntu:20.04
           - runner: macos-15
             os: darwin
             arch: arm64
@@ -141,16 +36,33 @@ jobs:
             os: windows
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || null }}
     defaults:
       run:
-        shell: ${{ matrix.os == 'windows' && 'pwsh' || 'bash' }}
+        # bash is available on all runners (Git Bash on Windows).
+        shell: bash
+
     steps:
       - uses: actions/checkout@v7
-      # The runner's gcc is an x86_64 MinGW cross compiler, which cannot
-      # assemble arm64. CGO needs a GNU-ABI aarch64 compiler, so the pinned
-      # LLVM-MinGW toolchain is installed for the Windows arm64 leg.
-      - name: Install the Windows arm64 C toolchain
-        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+
+      # ---- Platform-specific setup ----
+
+      # Linux builds inside Ubuntu 20.04 so the binary remains compatible with
+      # the SDK's glibc baseline. Ubuntu 20.04's apt nodejs (v10) is too old
+      # for opencode-ai's postinstall.mjs which uses modern JS syntax, so
+      # install Node.js 20.x from NodeSource instead.
+      - name: Install Node.js 20.x (Linux container)
+        if: matrix.container != null
+        run: |
+          apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gcc git
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+
+      # The windows-11-arm runner's gcc is an x86_64 MinGW cross compiler,
+      # which cannot assemble arm64. CGO needs a GNU-ABI aarch64 compiler, so
+      # the pinned LLVM-MinGW toolchain is installed for the Windows arm64 leg.
+      - name: Install Windows arm64 C toolchain
+        if: matrix.runner == 'windows-11-arm'
         shell: pwsh
         env:
           LLVM_MINGW_VERSION: "20260616"
@@ -158,25 +70,26 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          $version = $env:LLVM_MINGW_VERSION
+          $ver = $env:LLVM_MINGW_VERSION
           $zip = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
           $dest = Join-Path $env:RUNNER_TEMP 'llvm-mingw'
-          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-aarch64.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/llvm-mingw-$ver-ucrt-aarch64.zip"
           Invoke-WebRequest -Uri $url -OutFile $zip
           $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
           if ($actual -ne $env:LLVM_MINGW_SHA256) {
             throw "LLVM-MinGW checksum mismatch: got $actual"
           }
           Expand-Archive -LiteralPath $zip -DestinationPath $dest -Force
-          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $dest "llvm-mingw-$version-ucrt-aarch64\bin")
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $dest "llvm-mingw-$ver-ucrt-aarch64\bin")
           Add-Content -Path $env:GITHUB_ENV -Value 'CC=aarch64-w64-mingw32-clang'
           Add-Content -Path $env:GITHUB_ENV -Value 'CXX=aarch64-w64-mingw32-clang++'
+
       - uses: actions/setup-go@v7
         with:
           go-version: "1.22"
           cache: true
+
       - name: Verify native target
-        shell: bash
         run: |
           test "$(go env GOOS)" = "${{ matrix.os }}"
           test "$(go env GOARCH)" = "${{ matrix.arch }}"
@@ -184,15 +97,14 @@ jobs:
             go env CC | grep -q aarch64-w64-mingw32-clang
           fi
 
-      - name: Build just-code
-        run: go build -o just-code ./cmd/just-code
-
-      - name: Build version detection test helper
-        run: go build -o test-version ./cmd/test-version-detect
+      - name: Build just-code and test helper
+        run: |
+          go build -o just-code ./cmd/just-code
+          go build -o test-version ./cmd/test-version-detect
 
       # ---- Test with opencode v2 ----
+
       - name: Install opencode v2
-        shell: bash
         run: curl -fsSL https://opencode.ai/v2/install | bash
 
       # On Windows, the install script adds a Unix-style path (/c/Users/...) to
@@ -200,83 +112,59 @@ jobs:
       # %PATH% and expects Windows-style paths (C:\Users\...). Adding the
       # Windows-style path in a separate step lets $GITHUB_PATH take effect
       # before the verify step, so the Go test helper can find opencode.exe.
-      - name: Fix opencode PATH for Windows (Go compat)
+      - name: Add opencode v2 to Windows PATH
         if: matrix.os == 'windows'
         shell: pwsh
-        run: |
-          $winpath = Join-Path $HOME ".opencode\bin"
-          Add-Content -Path $env:GITHUB_PATH -Value $winpath
+        run: Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $HOME ".opencode\bin")
 
-      - name: Verify v2 install and test detection
-        shell: bash
+      - name: Verify v2 detection
         run: |
           version=$(opencode --version)
-          echo "v2 binary reports: $version"
+          echo "v2: $version"
           echo "$version" | grep -E "^opencode v2\." || {
             echo "FAIL: expected v2, got '$version'"
             exit 1
           }
           ./test-version
 
-      # ---- Swap to opencode v1 ----
-      - name: Install opencode v1 (latest v1.x from npm)
-        shell: bash
-        run: |
-          # Move v2 binary out of the way
-          mkdir -p ~/.opencode/bin
-          if [ -f ~/.opencode/bin/opencode ]; then
-            mv ~/.opencode/bin/opencode ~/.opencode/bin/opencode.v2
-          fi
-          if [ -f ~/.opencode/bin/opencode.exe ]; then
-            mv ~/.opencode/bin/opencode.exe ~/.opencode/bin/opencode.v2.exe
-          fi
-          # Dynamically resolve latest v1.x from npm registry.
-          # Use mktemp for a platform-correct temp path (Git Bash on Windows
-          # translates /tmp to a different location than Node.js does).
-          TMPFILE=$(mktemp)
-          npm view opencode-ai versions --json 2>/dev/null > "$TMPFILE"
-          LATEST_V1=$(node -e "
-            const versions = JSON.parse(require('fs').readFileSync('$TMPFILE','utf8'));
-            const v = versions.filter(x => /^1\\.\\d+\\.\\d+$/.test(x));
-            v.sort((a, b) => {
-              const pa = a.split('.').map(Number);
-              const pb = b.split('.').map(Number);
-              for (let i = 0; i < 3; i++) {
-                if (pa[i] !== pb[i]) return pa[i] - pb[i];
-              }
-              return 0;
-            });
-            console.log(v.pop());
-          ")
-          rm -f "$TMPFILE"
-          echo "Latest opencode v1: $LATEST_V1"
-          # The postinstall.mjs creates the CLI symlink.
-          npm install -g "opencode-ai@$LATEST_V1"
-          # Ensure npm global bin is on PATH
-          echo "$(npm root -g)/.bin" >> $GITHUB_PATH
+      # ---- Test with opencode v1 (installed to a separate prefix) ----
 
-      - name: Verify v1 install and test detection
-        shell: bash
+      - name: Install opencode v1
+        run: |
+          V1_PREFIX="$HOME/.opencode-v1"
+          # Resolve the latest 1.x version from npm. The pipe reads stdin via
+          # file descriptor 0, which works on both Unix and Windows (unlike
+          # /dev/stdin).
+          LATEST_V1=$(npm view opencode-ai versions --json 2>/dev/null | \
+            node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).reverse().find(x=>/^1\.\d+\.\d+$/.test(x))")
+          echo "Latest v1: $LATEST_V1"
+          # Install to a separate prefix so v2 is undisturbed — no moving
+          # binaries, no restore step needed.
+          npm install -g --prefix "$V1_PREFIX" "opencode-ai@$LATEST_V1"
+
+      # On Unix, echo works fine (no backslashes in paths). On Windows, the
+      # Go test helper reads the native %PATH% and needs Windows-style paths,
+      # so PowerShell is used.
+      - name: Add opencode v1 to PATH (Unix)
+        if: matrix.os != 'windows'
+        run: echo "$HOME/.opencode-v1/bin" >> $GITHUB_PATH
+
+      - name: Add opencode v1 to Windows PATH
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $HOME ".opencode-v1\bin")
+
+      - name: Verify v1 detection
         run: |
           version=$(opencode --version)
-          echo "v1 binary reports: $version"
-          # Assert it's NOT v2+
+          echo "v1: $version"
           echo "$version" | grep -v -E "^opencode v[2-9]\." || {
             echo "FAIL: expected v1, got '$version'"
             exit 1
           }
           ./test-version
 
-      # ---- Restore v2 and run full unit tests ----
-      - name: Restore v2 and run unit tests
-        shell: bash
-        run: |
-          if [ -f ~/.opencode/bin/opencode.v2 ]; then
-            mv ~/.opencode/bin/opencode.v2 ~/.opencode/bin/opencode
-          fi
-          if [ -f ~/.opencode/bin/opencode.v2.exe ]; then
-            mv ~/.opencode/bin/opencode.v2.exe ~/.opencode/bin/opencode.exe
-          fi
-          # Remove npm's v1 if it shadows the restored v2
-          rm -f "$(npm root -g)/.bin/opencode" "$(npm root -g)/.bin/opencode.exe" 2>/dev/null || true
-          go test ./...
+      # ---- Clean up v1 prefix (no restore needed: v2 was never moved) ----
+
+      - name: Remove v1 installation
+        run: rm -rf "$HOME/.opencode-v1"
